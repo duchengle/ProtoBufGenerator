@@ -283,7 +283,7 @@ begin
   Inc(iPos, 2);
   while iPos < Length(Proto) do
   begin
-    if (Proto[iPos] = '*') and (Proto[iPos + 1] = '/') then
+    if (Proto[iPos] = '*') and (iPos + 1 <= Length(Proto)) and (Proto[iPos + 1] = '/') then
     begin
       Inc(iPos, 2);
       Break;
@@ -348,7 +348,8 @@ begin
       begin
         Inc(iPos, 2);
         s := '';
-        while (iPos < Length(Proto)) and not ((Proto[iPos] = '*') and (Proto[iPos + 1] = '/')) do
+        while (iPos < Length(Proto)) and
+              not ((Proto[iPos] = '*') and (iPos + 1 <= Length(Proto)) and (Proto[iPos + 1] = '/')) do
         begin
           s := s + Proto[iPos];
           Inc(iPos);

@@ -483,6 +483,8 @@ begin
   CheckEquals('Enum1', FProtoBufEnum.Name);
   CheckEquals(1, FProtoBufEnum.Count);
   CheckEquals('Val1', FProtoBufEnum[0].Name);
+  // allow_alias should remain at its default value (false) since the unknown option was ignored
+  CheckFalse(FProtoBufEnum.AllowAlias, 'AllowAlias should not be set by unknown option');
 end;
 
 procedure TestTProtoBufEnum.TestParseFromProto;
