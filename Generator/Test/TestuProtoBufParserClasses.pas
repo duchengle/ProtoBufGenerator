@@ -807,7 +807,7 @@ begin
   CheckEquals('SearchRequest', FProtoFile.ProtoBufMessages[0].Name);
   // query(1) + scores(1 map field) = 2 fields
   CheckEquals(2, FProtoFile.ProtoBufMessages[0].Count);
-  CheckEquals(ptMap, FProtoFile.ProtoBufMessages[0][1].PropKind);
+  CheckTrue(ptMap = FProtoFile.ProtoBufMessages[0][1].PropKind);
   CheckEquals('scores', FProtoFile.ProtoBufMessages[0][1].Name);
   CheckEquals('string', FProtoFile.ProtoBufMessages[0][1].MapKeyType);
   CheckEquals('int32', FProtoFile.ProtoBufMessages[0][1].PropType);
@@ -855,21 +855,21 @@ begin
   CheckEquals(3, FProtoFile.ProtoBufMessages[0].Count);
 
   Prop := FProtoFile.ProtoBufMessages[0][0];
-  CheckEquals(ptMap, Prop.PropKind);
+  CheckTrue(ptMap = Prop.PropKind);
   CheckEquals('weights', Prop.Name);
   CheckEquals('string', Prop.MapKeyType);
   CheckEquals('int32', Prop.PropType);
   CheckEquals(1, Prop.PropFieldNum);
 
   Prop := FProtoFile.ProtoBufMessages[0][1];
-  CheckEquals(ptMap, Prop.PropKind);
+  CheckTrue(ptMap = Prop.PropKind);
   CheckEquals('labels', Prop.Name);
   CheckEquals('int32', Prop.MapKeyType);
   CheckEquals('string', Prop.PropType);
   CheckEquals(2, Prop.PropFieldNum);
 
   Prop := FProtoFile.ProtoBufMessages[0][2];
-  CheckEquals(ptMap, Prop.PropKind);
+  CheckTrue(ptMap = Prop.PropKind);
   CheckEquals('flags', Prop.Name);
   CheckEquals('string', Prop.MapKeyType);
   CheckEquals('bool', Prop.PropType);
