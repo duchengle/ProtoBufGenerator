@@ -170,13 +170,82 @@ begin
   Result[Length(Result)] := '''';
 end;
 
+// Returns the TProtoBufInput read method name for a given proto scalar type name.
+// Used for map key/value type handling.
+function GetReadMethodForProtoTypeName(const AProtoTypeName: string): string;
+var
+  PT: TScalarPropertyType;
+begin
+  PT := StrToPropertyType(AProtoTypeName);
+  case PT of
+    sptDouble:   Result := 'Double';
+    sptFloat:    Result := 'Float';
+    sptInt32:    Result := 'Int32';
+    sptInt64:    Result := 'Int64';
+    sptuInt32:   Result := 'UInt32';
+    sptUint64:   Result := 'Int64';
+    sptSInt32:   Result := 'SInt32';
+    sptSInt64:   Result := 'SInt64';
+    sptFixed32:  Result := 'Fixed32';
+    sptFixed64:  Result := 'Fixed64';
+    sptSFixed32: Result := 'SFixed32';
+    sptSFixed64: Result := 'SFixed64';
+    sptBool:     Result := 'Boolean';
+    sptString:   Result := 'String';
+    sptBytes:    Result := 'Bytes';
+  else
+    Result := 'Enum'; // enum or message type; caller must handle object types separately
+  end;
+end;
+
+// Returns the TProtoBufOutput write method name for a given proto scalar type name.
+function GetWriteMethodForProtoTypeName(const AProtoTypeName: string): string;
+var
+  PT: TScalarPropertyType;
+begin
+  PT := StrToPropertyType(AProtoTypeName);
+  case PT of
+    sptDouble:   Result := 'Double';
+    sptFloat:    Result := 'Float';
+    sptInt32:    Result := 'Int32';
+    sptInt64:    Result := 'Int64';
+    sptuInt32:   Result := 'UInt32';
+    sptUint64:   Result := 'Int64';
+    sptSInt32:   Result := 'SInt32';
+    sptSInt64:   Result := 'SInt64';
+    sptFixed32:  Result := 'Fixed32';
+    sptFixed64:  Result := 'Fixed64';
+    sptSFixed32: Result := 'SFixed32';
+    sptSFixed64: Result := 'SFixed64';
+    sptBool:     Result := 'Boolean';
+    sptString:   Result := 'String';
+    sptBytes:    Result := 'Bytes';
+  else
+    Result := 'Int32'; // enum types written as int32
+  end;
+end;
+
+// Returns a default zero-value literal for a Delphi type name
+function DelphiTypeDefaultValue(const ADelphiTypeName: string): string;
+begin
+  if SameText(ADelphiTypeName, 'string') then
+    Result := ''''''
+  else if SameText(ADelphiTypeName, 'Boolean') then
+    Result := 'False'
+  else
+    Result := '0';
+end;
+
 type
   TDelphiProperty = record
     IsList: Boolean;
+    IsMap: Boolean;
     isComplex: Boolean;
     isObject: Boolean;
     PropertyName: string;
     PropertyType: string;
+    MapKeyDelphiType: string;
+    MapValueDelphiType: string;
     function tagName: string;
     function readOnlyDelphiProperty: Boolean;
   end;
@@ -184,12 +253,26 @@ type
 procedure ParsePropType(Prop: TProtoBufProperty; Proto: TProtoFile; out DelphiProp: TDelphiProperty);
 begin
   DelphiProp.IsList := Prop.PropKind = ptRepeated;
+  DelphiProp.IsMap := Prop.PropKind = ptMap;
   DelphiProp.isComplex := StrToPropertyType(Prop.PropType) = sptComplex;
   if DelphiProp.isComplex then
     DelphiProp.isObject := Assigned(Proto.ProtoBufMessages.FindByName(Prop.PropType))
   else
     DelphiProp.isObject := False;
-  if not DelphiProp.IsList then
+
+  if DelphiProp.IsMap then
+    begin
+      DelphiProp.MapKeyDelphiType := ProtoPropTypeToDelphiType(Prop.MapKeyType);
+      DelphiProp.MapValueDelphiType := ProtoPropTypeToDelphiType(Prop.PropType);
+      DelphiProp.PropertyName := Prop.Name;
+      if DelphiProp.isObject then
+        DelphiProp.PropertyType := Format('TObjectDictionary<%s, %s>',
+          [DelphiProp.MapKeyDelphiType, DelphiProp.MapValueDelphiType])
+      else
+        DelphiProp.PropertyType := Format('TDictionary<%s, %s>',
+          [DelphiProp.MapKeyDelphiType, DelphiProp.MapValueDelphiType]);
+    end
+  else if not DelphiProp.IsList then
     begin
       DelphiProp.PropertyName := Prop.Name;
       DelphiProp.PropertyType := ProtoPropTypeToDelphiType(Prop.PropType);
@@ -216,7 +299,8 @@ begin
     begin
       Prop := ProtoMsg[i];
       ParsePropType(Prop, Proto, DelphiProp);
-      Result := (Prop.PropKind = ptRequired) or DelphiProp.IsList or DelphiProp.isObject or Prop.PropOptions.HasValue['default'];
+      Result := (Prop.PropKind = ptRequired) or DelphiProp.IsList or DelphiProp.isObject or
+                DelphiProp.IsMap or Prop.PropOptions.HasValue['default'];
       if Result then
         Break;
     end;
@@ -299,9 +383,18 @@ procedure TProtoBufGenerator.GenerateImplementationSection(Proto: TProtoFile; SL
     for i := 0 to ProtoMsg.Count - 1 do
       begin
         Prop := ProtoMsg[i];
+        if Prop.PropKind in [ptReserved] then
+          Continue;
         ParsePropType(Prop, Proto, DelphiProp);
         if DelphiProp.IsList or DelphiProp.isObject then
           SL.Add(Format('  F%s := %s.Create;', [DelphiProp.PropertyName, DelphiProp.PropertyType]));
+        if DelphiProp.IsMap then
+        begin
+          if DelphiProp.isObject then
+            SL.Add(Format('  F%s := %s.Create([doOwnsValues]);', [DelphiProp.PropertyName, DelphiProp.PropertyType]))
+          else
+            SL.Add(Format('  F%s := %s.Create;', [DelphiProp.PropertyName, DelphiProp.PropertyType]));
+        end;
         if Prop.PropOptions.HasValue['default'] then
           SL.Add(Format('  %s%s := %s;', [IfThen(DelphiProp.readOnlyDelphiProperty, 'F', ''), DelphiProp.PropertyName, ReQuoteStr(Prop.PropOptions.Value['default'])]));
         if Prop.PropKind = ptRequired then
@@ -315,8 +408,10 @@ procedure TProtoBufGenerator.GenerateImplementationSection(Proto: TProtoFile; SL
     for i := 0 to ProtoMsg.Count - 1 do
       begin
         Prop := ProtoMsg[i];
+        if Prop.PropKind in [ptReserved] then
+          Continue;
         ParsePropType(Prop, Proto, DelphiProp);
-        if DelphiProp.IsList or DelphiProp.isObject then
+        if DelphiProp.IsList or DelphiProp.isObject or DelphiProp.IsMap then
           SL.Add(Format('  F%s.Free;', [DelphiProp.PropertyName]));
       end;
     SL.Add('  inherited;');
@@ -330,9 +425,18 @@ procedure TProtoBufGenerator.GenerateImplementationSection(Proto: TProtoFile; SL
     Prop: TProtoBufProperty;
     DelphiProp, OneOfDelphiProp: TDelphiProperty;
     bNeedtmpBuf: Boolean;
+    bNeedMapTag: Boolean;
+    bNeedMapInnerBuf: Boolean;
+    MapVarDecls: TStringList;
     sIndent: string;
+    sMapVar: string;
+    nExtraVars: Integer;
   begin
     bNeedtmpBuf:= False;
+    bNeedMapTag:= False;
+    bNeedMapInnerBuf:= False;
+    MapVarDecls:= TStringList.Create;
+    try
     SL.Add(Format('function T%s.LoadSingleFieldFromBuf(ProtoBuf: TProtoBufInput; FieldNumber: Integer; WireType: Integer): Boolean;', [ProtoMsg.Name]));
     iInsertVarBlock:= SL.Count;
     SL.Add('begin');
@@ -351,13 +455,78 @@ procedure TProtoBufGenerator.GenerateImplementationSection(Proto: TProtoFile; SL
       begin
         Prop := ProtoMsg[i];
         ParsePropType(Prop, Proto, DelphiProp);
-        if Prop.PropKind = ptOneOf then
+        if Prop.PropKind in [ptOneOf, ptReserved] then
           Continue;
         SL.Add(Format('    %s:', [DelphiProp.tagName]));
         iBeginBlock:= SL.Count;
         SL.Add('      begin');
         sIndent:=  StringOfChar(' ', 8); {4 for case + 4 for tag and begin/end}
-        if not DelphiProp.IsList then
+        if DelphiProp.IsMap then
+          begin
+            // Map field: each wire occurrence is one map entry (key+value sub-message)
+            bNeedtmpBuf:= True;
+            bNeedMapTag:= True;
+            MapVarDecls.Add(Format('  l_%s_K: %s;', [DelphiProp.PropertyName, DelphiProp.MapKeyDelphiType]));
+            SL.Add(Format('%stmpBuf := ProtoBuf.ReadSubProtoBufInput;', [sIndent]));
+            SL.Add(Format('%sl_%s_K := %s;',
+              [sIndent, DelphiProp.PropertyName,
+              DelphiTypeDefaultValue(DelphiProp.MapKeyDelphiType)]));
+            if DelphiProp.isObject then
+            begin
+              bNeedMapInnerBuf:= True;
+              MapVarDecls.Add(Format('  l_%s_V: %s;', [DelphiProp.PropertyName, DelphiProp.MapValueDelphiType]));
+              SL.Add(Format('%sl_%s_V := nil;', [sIndent, DelphiProp.PropertyName]));
+              SL.Add(Format('%slMapTag := tmpBuf.readTag;', [sIndent]));
+              SL.Add(Format('%swhile lMapTag <> 0 do', [sIndent]));
+              SL.Add(Format('%sbegin', [sIndent]));
+              SL.Add(Format('%s  case getTagFieldNumber(lMapTag) of', [sIndent]));
+              SL.Add(Format('%s    1: l_%s_K := tmpBuf.read%s;',
+                [sIndent, DelphiProp.PropertyName,
+                GetReadMethodForProtoTypeName(Prop.MapKeyType)]));
+              SL.Add(Format('%s    2: begin', [sIndent]));
+              SL.Add(Format('%s         FreeAndNil(l_%s_V);', [sIndent, DelphiProp.PropertyName]));
+              SL.Add(Format('%s         l_%s_V := %s.Create;', [sIndent, DelphiProp.PropertyName, DelphiProp.MapValueDelphiType]));
+              SL.Add(Format('%s         lMapInnerBuf := tmpBuf.ReadSubProtoBufInput;', [sIndent]));
+              SL.Add(Format('%s         l_%s_V.LoadFromBuf(lMapInnerBuf);', [sIndent, DelphiProp.PropertyName]));
+              SL.Add(Format('%s         FreeAndNil(lMapInnerBuf);', [sIndent]));
+              SL.Add(Format('%s       end;', [sIndent]));
+              SL.Add(Format('%s  else tmpBuf.skipField(lMapTag);', [sIndent]));
+              SL.Add(Format('%s  end;', [sIndent]));
+              SL.Add(Format('%s  lMapTag := tmpBuf.readTag;', [sIndent]));
+              SL.Add(Format('%send;', [sIndent]));
+              SL.Add(Format('%sif l_%s_V = nil then', [sIndent, DelphiProp.PropertyName]));
+              SL.Add(Format('%s  l_%s_V := %s.Create;', [sIndent, DelphiProp.PropertyName, DelphiProp.MapValueDelphiType]));
+              SL.Add(Format('%sF%s.AddOrSetValue(l_%s_K, l_%s_V);',
+                [sIndent, DelphiProp.PropertyName, DelphiProp.PropertyName, DelphiProp.PropertyName]));
+            end else
+            begin
+              MapVarDecls.Add(Format('  l_%s_V: %s;', [DelphiProp.PropertyName, DelphiProp.MapValueDelphiType]));
+              SL.Add(Format('%sl_%s_V := %s;',
+                [sIndent, DelphiProp.PropertyName,
+                DelphiTypeDefaultValue(DelphiProp.MapValueDelphiType)]));
+              SL.Add(Format('%slMapTag := tmpBuf.readTag;', [sIndent]));
+              SL.Add(Format('%swhile lMapTag <> 0 do', [sIndent]));
+              SL.Add(Format('%sbegin', [sIndent]));
+              SL.Add(Format('%s  case getTagFieldNumber(lMapTag) of', [sIndent]));
+              SL.Add(Format('%s    1: l_%s_K := tmpBuf.read%s;',
+                [sIndent, DelphiProp.PropertyName,
+                GetReadMethodForProtoTypeName(Prop.MapKeyType)]));
+              if DelphiProp.isComplex then
+                SL.Add(Format('%s    2: l_%s_V := %s(tmpBuf.readEnum);',
+                  [sIndent, DelphiProp.PropertyName, DelphiProp.MapValueDelphiType]))
+              else
+                SL.Add(Format('%s    2: l_%s_V := tmpBuf.read%s;',
+                  [sIndent, DelphiProp.PropertyName,
+                  GetReadMethodForProtoTypeName(Prop.PropType)]));
+              SL.Add(Format('%s  else tmpBuf.skipField(lMapTag);', [sIndent]));
+              SL.Add(Format('%s  end;', [sIndent]));
+              SL.Add(Format('%s  lMapTag := tmpBuf.readTag;', [sIndent]));
+              SL.Add(Format('%send;', [sIndent]));
+              SL.Add(Format('%sF%s.AddOrSetValue(l_%s_K, l_%s_V);',
+                [sIndent, DelphiProp.PropertyName, DelphiProp.PropertyName, DelphiProp.PropertyName]));
+            end;
+          end
+        else if not DelphiProp.IsList then
           begin
             if not DelphiProp.isComplex then
               SL.Add(Format('%s%s := ProtoBuf.read%s;', [sIndent, DelphiProp.PropertyName, GetProtoBufMethodForScalarType(Prop)]))
@@ -428,20 +597,41 @@ procedure TProtoBufGenerator.GenerateImplementationSection(Proto: TProtoFile; SL
     SL.Add('  end;');
     if bNeedtmpBuf then
       begin
+        // Count extra variable lines to properly adjust iInserttmpBufCreation.
+        // We insert: 'var', 'tmpBuf', map tag var (if any), inner buf (if any), per-field vars
+        nExtraVars := 2; // 'var' + 'tmpBuf'
+        if bNeedMapTag then Inc(nExtraVars);
+        if bNeedMapInnerBuf then Inc(nExtraVars);
+        Inc(nExtraVars, MapVarDecls.Count);
+
+        // Insert per-field map key/value variable declarations first (in order)
+        for sMapVar in MapVarDecls do
+          SL.Insert(iInsertVarBlock, sMapVar);
+        if bNeedMapInnerBuf then
+          SL.Insert(iInsertVarBlock, '  lMapInnerBuf: TProtoBufInput;');
+        if bNeedMapTag then
+          SL.Insert(iInsertVarBlock, '  lMapTag: Integer;');
         SL.Insert(iInsertVarBlock, '  tmpBuf: TProtoBufInput;');
         SL.Insert(iInsertVarBlock, 'var');
 
-        Inc(iInserttmpBufCreation, 2); //we just added two lines for the declaration
+        Inc(iInserttmpBufCreation, nExtraVars);
         SL.Insert(iInserttmpBufCreation, '  try');
         SL.Insert(iInserttmpBufCreation, '  tmpBuf:= nil;');
-        for i:= iInserttmpBufCreation + 2 to SL.Count - 1 do
+        if bNeedMapInnerBuf then
+          SL.Insert(iInserttmpBufCreation, '  lMapInnerBuf:= nil;');
+        for i:= iInserttmpBufCreation + 2 + Ord(bNeedMapInnerBuf) to SL.Count - 1 do
           SL[i]:= '  ' + SL[i];
         SL.Add('  finally');
         SL.Add('    tmpBuf.Free');
+        if bNeedMapInnerBuf then
+          SL.Add('    lMapInnerBuf.Free');
         SL.Add('  end;');
       end;
     SL.Add('end;');
     SL.Add('');
+    finally
+      MapVarDecls.Free;
+    end;
   end;
 
   procedure WriteSaveProc(ProtoMsg: TProtoBufMessage; SL: TStrings);
@@ -450,9 +640,18 @@ procedure TProtoBufGenerator.GenerateImplementationSection(Proto: TProtoFile; SL
     Prop: TProtoBufProperty;
     DelphiProp: TDelphiProperty;
     bNeedtmpBuf, bNeedCounterVar: Boolean;
+    bNeedMapKeyIter: Boolean;
+    bNeedMapInnerBuf: Boolean;
+    MapKeyVarDecls: TStringList;
+    sMapKeyVar: string;
+    nExtraVars: Integer;
   begin
     bNeedtmpBuf:= False;
     bNeedCounterVar:= False;
+    bNeedMapKeyIter:= False;
+    bNeedMapInnerBuf:= False;
+    MapKeyVarDecls:= TStringList.Create;
+    try
     SL.Add(Format('procedure T%s.SaveFieldsToBuf(ProtoBuf: TProtoBufOutput);', [ProtoMsg.Name]));
     iInsertVarBlock:= sl.Count;
     SL.Add('begin');
@@ -463,11 +662,38 @@ procedure TProtoBufGenerator.GenerateImplementationSection(Proto: TProtoFile; SL
         Prop := ProtoMsg[i];
         ParsePropType(Prop, Proto, DelphiProp);
 
-        if Prop.PropKind = ptOneOf then
+        if Prop.PropKind in [ptOneOf, ptReserved] then
           Continue;
 
         SL.Add(Format('  if FieldHasValue[%s] then', [DelphiProp.tagName]));
-        if not DelphiProp.IsList then
+        if DelphiProp.IsMap then
+          begin
+            // Map field: write each entry as a sub-message with key=field1, value=field2
+            bNeedtmpBuf:= True;
+            bNeedMapKeyIter:= True;
+            MapKeyVarDecls.Add(Format('  l_%s_K: %s;', [DelphiProp.PropertyName, DelphiProp.MapKeyDelphiType]));
+            SL.Add('  begin');
+            SL.Add(Format('    for l_%s_K in F%s.Keys do', [DelphiProp.PropertyName, DelphiProp.PropertyName]));
+            SL.Add('    begin');
+            SL.Add('      tmpBuf.Clear;');
+            SL.Add(Format('      tmpBuf.write%s(1, l_%s_K);',
+              [GetWriteMethodForProtoTypeName(Prop.MapKeyType), DelphiProp.PropertyName]));
+            if DelphiProp.isObject then
+            begin
+              bNeedMapInnerBuf:= True;
+              SL.Add(Format('      SaveMessageFieldToBuf(F%s[l_%s_K], 2, lMapInnerBuf, tmpBuf);',
+                [DelphiProp.PropertyName, DelphiProp.PropertyName]));
+            end else if DelphiProp.isComplex then
+              SL.Add(Format('      tmpBuf.writeInt32(2, Integer(F%s[l_%s_K]));',
+                [DelphiProp.PropertyName, DelphiProp.PropertyName]))
+            else
+              SL.Add(Format('      tmpBuf.write%s(2, F%s[l_%s_K]);',
+                [GetWriteMethodForProtoTypeName(Prop.PropType), DelphiProp.PropertyName, DelphiProp.PropertyName]));
+            SL.Add(Format('      ProtoBuf.writeMessage(%s, tmpBuf);', [DelphiProp.tagName]));
+            SL.Add('    end;');
+            SL.Add('  end;');
+          end
+        else if not DelphiProp.IsList then
           begin
             if not DelphiProp.isComplex then
               SL.Add(Format('    ProtoBuf.write%s(%s, F%s);', [GetProtoBufMethodForScalarType(Prop), DelphiProp.tagName, DelphiProp.PropertyName]))
@@ -528,11 +754,32 @@ procedure TProtoBufGenerator.GenerateImplementationSection(Proto: TProtoFile; SL
           end;
       end;
 
-    if bNeedtmpBuf or bNeedCounterVar then
+    if bNeedtmpBuf or bNeedCounterVar or bNeedMapKeyIter then
       begin
+        nExtraVars := 1; // 'var'
+        if bNeedCounterVar then
+          Inc(nExtraVars);
+        if bNeedMapKeyIter then
+          Inc(nExtraVars, MapKeyVarDecls.Count);
+        if bNeedMapInnerBuf then
+          Inc(nExtraVars);
+        if bNeedtmpBuf then
+          Inc(nExtraVars);
+
         if bNeedCounterVar then
         begin
           SL.Insert(iInsertVarBlock, '  i: Integer;');
+          Inc(iInserttmpBufCreation);
+        end;
+        // Insert per-map key iteration variable declarations
+        for sMapKeyVar in MapKeyVarDecls do
+        begin
+          SL.Insert(iInsertVarBlock, sMapKeyVar);
+          Inc(iInserttmpBufCreation);
+        end;
+        if bNeedMapInnerBuf then
+        begin
+          SL.Insert(iInsertVarBlock, '  lMapInnerBuf: TProtoBufOutput;');
           Inc(iInserttmpBufCreation);
         end;
         if bNeedtmpBuf then
@@ -546,16 +793,23 @@ procedure TProtoBufGenerator.GenerateImplementationSection(Proto: TProtoFile; SL
           begin
             SL.Insert(iInserttmpBufCreation, '  try');
             SL.Insert(iInserttmpBufCreation, '  tmpBuf:= TProtoBufOutput.Create;');
-            for i:= iInserttmpBufCreation + 2 to SL.Count - 1 do
+            if bNeedMapInnerBuf then
+              SL.Insert(iInserttmpBufCreation, '  lMapInnerBuf:= TProtoBufOutput.Create;');
+            for i:= iInserttmpBufCreation + 2 + Ord(bNeedMapInnerBuf) to SL.Count - 1 do
               SL[i]:= '  ' + SL[i];
             SL.Add('  finally');
             SL.Add('    tmpBuf.Free');
+            if bNeedMapInnerBuf then
+              SL.Add('    lMapInnerBuf.Free');
             SL.Add('  end;');
           end;
       end;
 
     SL.Add('end;');
     SL.Add('');
+    finally
+      MapKeyVarDecls.Free;
+    end;
   end;
 
   procedure WriteSetterProcs(ProtoMsg: TProtoBufMessage; SL: TStrings);
@@ -692,6 +946,8 @@ var
     for i := 0 to ProtoMsg.Count - 1 do
       begin
         Prop := ProtoMsg[i];
+        if Prop.PropKind = ptReserved then
+          Continue;
         ParsePropType(Prop, Proto, DelphiProp);
         if Prop.PropKind = ptOneOf then
           Continue;
@@ -725,6 +981,8 @@ var
     for i := 0 to ProtoMsg.Count - 1 do
       begin
         Prop := ProtoMsg[i];
+        if Prop.PropKind = ptReserved then
+          Continue;
         ParsePropType(Prop, Proto, DelphiProp);
         SL.Add(Format('    F%s: %s;', [DelphiProp.PropertyName, DelphiProp.PropertyType]));
       end;
@@ -733,6 +991,8 @@ var
     for i := 0 to ProtoMsg.Count - 1 do
       begin
         Prop := ProtoMsg[i];
+        if Prop.PropKind = ptReserved then
+          Continue;
         ParsePropType(Prop, Proto, DelphiProp);
         if DelphiProp.readOnlyDelphiProperty then
           Continue;
@@ -757,10 +1017,12 @@ var
     for i := 0 to ProtoMsg.Count - 1 do
       begin
         Prop := ProtoMsg[i];
+        if Prop.PropKind = ptReserved then
+          Continue;
         ParsePropType(Prop, Proto, DelphiProp);
-        //we need Generics.Collection if TList<> is used, but not for
-        //TProtoBufClassList, which is defined in uAbstractProtoBufClasses
-        if DelphiProp.IsList and (not DelphiProp.IsObject) then
+        //we need Generics.Collection if TList<> or TDictionary<> is used,
+        //but not for TProtoBufClassList or TObjectDictionary (needs Generics.Collections too)
+        if (DelphiProp.IsList and (not DelphiProp.IsObject)) or DelphiProp.IsMap then
           bNeedsGenericsCollection:= True;
         for j:= 0 to Prop.Comments.Count - 1 do
           SL.Add('    //' + Prop.Comments[j]);
@@ -876,7 +1138,7 @@ end;
 
 function TDelphiProperty.readOnlyDelphiProperty: Boolean;
 begin
-  Result := IsList or isObject;
+  Result := IsList or isObject or IsMap;
 end;
 
 function TDelphiProperty.tagName: string;

@@ -15,7 +15,8 @@ type
     ptOptional, //
     ptRepeated, //
     ptReserved,
-    ptOneOf);
+    ptOneOf,
+    ptMap);
 
   TScalarPropertyType = ( //
     sptComplex, //
@@ -60,6 +61,7 @@ type
     FPropKind: TPropKind;
     FPropOptions: TProtoBufPropOptions;
     FOneOfPropertyParent: TProtoBufProperty;
+    FMapKeyType: string;
   public
     constructor Create(ARoot: TAbstractProtoBufParserItem); override;
     destructor Destroy; override;
@@ -71,6 +73,7 @@ type
     property PropFieldNum: integer read FPropFieldNum;
     property PropOptions: TProtoBufPropOptions read FPropOptions;
     property OneOfPropertyParent: TProtoBufProperty read FOneOfPropertyParent write FOneOfPropertyParent;
+    property MapKeyType: string read FMapKeyType;
   end;
 
   TProtoBufEnumValue = class(TAbstractProtoBufParserItem)
@@ -172,6 +175,8 @@ begin
       Result := 'reserved';
     ptOneOf:
       Result := 'oneof';
+    ptMap:
+      Result := 'map';
   end;
 end;
 
@@ -272,6 +277,37 @@ begin
   end;
 end;
 
+procedure SkipBlockComment(const Proto: string; var iPos: integer);
+begin
+  // iPos is at '/*'; skip everything until matching '*/'
+  Inc(iPos, 2);
+  while iPos < Length(Proto) do
+  begin
+    if (Proto[iPos] = '*') and (iPos + 1 <= Length(Proto)) and (Proto[iPos + 1] = '/') then
+    begin
+      Inc(iPos, 2);
+      Break;
+    end;
+    Inc(iPos);
+  end;
+end;
+
+procedure SkipBlockBody(const Proto: string; var iPos: integer);
+var
+  depth: Integer;
+begin
+  // Called when iPos is just after '{'; skips until the matching '}'
+  depth := 1;
+  while (iPos <= Length(Proto)) and (depth > 0) do
+  begin
+    if Proto[iPos] = '{' then
+      Inc(depth)
+    else if Proto[iPos] = '}' then
+      Dec(depth);
+    Inc(iPos);
+  end;
+end;
+
 function ReadAllTillChar(const Proto: string; var iPos: integer; BreakSymbol: array of Char): string;
 begin
   Result := '';
@@ -290,18 +326,57 @@ end;
 procedure ReadCommentIfExists(ADestList: TStrings; AMultiLine: Boolean; const Proto: string; var iPos: integer);
 var
   s: string;
+  Lines: TStringList;
+  li: Integer;
+  line: string;
 begin
   SkipWhitespaces(Proto, iPos, False);
-  while (iPos < Length(Proto) - 1) and (Proto[iPos] = '/') and (Proto[iPos + 1] = '/') do
+  while (iPos + 1 <= Length(Proto)) and (Proto[iPos] = '/') do
     begin
-      Inc(iPos, 2);
-      SkipWhitespaces(Proto, iPos, False);
-      s:= ReadAllToEOL(Proto, iPos);
-      if Length(s) > 0 then
-        ADestList.Add(s);
-      //since we've Read to EOL, this will skip the EOL, if allowed
-      if AMultiLine then
-        SkipWhitespaces(Proto, iPos);
+      if Proto[iPos + 1] = '/' then
+      begin
+        Inc(iPos, 2);
+        SkipWhitespaces(Proto, iPos, False);
+        s:= ReadAllToEOL(Proto, iPos);
+        if Length(s) > 0 then
+          ADestList.Add(s);
+        //since we've Read to EOL, this will skip the EOL, if allowed
+        if AMultiLine then
+          SkipWhitespaces(Proto, iPos);
+      end
+      else if Proto[iPos + 1] = '*' then
+      begin
+        Inc(iPos, 2);
+        s := '';
+        while (iPos < Length(Proto)) and
+              not ((Proto[iPos] = '*') and (iPos + 1 <= Length(Proto)) and (Proto[iPos + 1] = '/')) do
+        begin
+          s := s + Proto[iPos];
+          Inc(iPos);
+        end;
+        if iPos < Length(Proto) then
+          Inc(iPos, 2); // skip '*/'
+        s := Trim(s);
+        if Length(s) > 0 then
+        begin
+          Lines := TStringList.Create;
+          try
+            Lines.Text := s;
+            for li := 0 to Lines.Count - 1 do
+            begin
+              line := Trim(Lines[li]);
+              if Length(line) > 0 then
+                ADestList.Add(line);
+            end;
+          finally
+            Lines.Free;
+          end;
+        end;
+        if AMultiLine then
+          SkipWhitespaces(Proto, iPos);
+      end
+      else
+        Break;
     end;
 end;
 
@@ -310,8 +385,15 @@ begin
   while True do
   begin
     SkipWhitespaces(Proto, iPos);
-    if (Proto[iPos] = '/') and (Proto[iPos + 1] = '/') then
-      ReadAllToEOL(Proto, iPos) else
+    if (iPos + 1 <= Length(Proto)) and (Proto[iPos] = '/') then
+    begin
+      if Proto[iPos + 1] = '/' then
+        ReadAllToEOL(Proto, iPos)
+      else if Proto[iPos + 1] = '*' then
+        SkipBlockComment(Proto, iPos)
+      else
+        Break;
+    end else
       Break;
   end;
   SkipWhitespaces(Proto, iPos);
@@ -349,7 +431,8 @@ begin
     [optional] int32   DefField1  = 1  [default = 2]; // def field 1, default value 2
     int64 DefField2 = 2;
   }
-  Buf := ReadWordFromBuf(Proto, iPos, []);
+  // Add '<' as a break symbol so 'map<' is read as 'map' then '<'
+  Buf := ReadWordFromBuf(Proto, iPos, ['<']);
   // in Buf - first word of property. Choose type
   FPropKind := StrToPropKind(Buf);
   if FPropKind = ptReserved then
@@ -359,9 +442,30 @@ begin
       exit; // reserved is not supported now by this parser
     end;
   if FPropKind <> ptDefaultOptional then // if required/optional/repeated is not skipped,
-    Buf := ReadWordFromBuf(Proto, iPos, []); // read type of property
+    Buf := ReadWordFromBuf(Proto, iPos, ['<']); // read type of property
 
   FPropType := Buf;
+
+  // Handle map<KeyType, ValueType> fields (proto3)
+  if SameText(FPropType, 'map') and (iPos <= Length(Proto)) and (Proto[iPos] = '<') then
+  begin
+    FPropKind := ptMap;
+    Inc(iPos); // skip '<'
+    FMapKeyType := Trim(ReadWordFromBuf(Proto, iPos, [',', '>']));
+    SkipRequiredChar(Proto, iPos, ',');
+    FPropType := Trim(ReadWordFromBuf(Proto, iPos, ['>']));
+    SkipRequiredChar(Proto, iPos, '>');
+    FName := ReadWordFromBuf(Proto, iPos, ['=']);
+    SkipRequiredChar(Proto, iPos, '=');
+    Buf := ReadWordFromBuf(Proto, iPos, [';', '[']);
+    FPropFieldNum := StrToInt(Buf);
+    SkipWhitespaces(Proto, iPos);
+    if (iPos <= Length(Proto)) and (Proto[iPos] = '[') then
+      FPropOptions.ParseFromProto(Proto, iPos);
+    SkipRequiredChar(Proto, iPos, ';');
+    ReadCommentIfExists(FComments, False, Proto, iPos);
+    Exit;
+  end;
 
   if FPropKind = ptOneOf then
   begin
@@ -492,9 +596,16 @@ begin
   if Length(FName) = 0 then
     raise EParserError.Create('Enumeration contains unnamed value');
   SkipRequiredChar(Proto, iPos, '=');
-  s:= ReadWordFromBuf(Proto, iPos, [';']);
+  s:= ReadWordFromBuf(Proto, iPos, [';', '[']);
   FValue := StrToInt(s);
   FIsHexValue:= Pos('0x', s) = 1;
+  // Skip optional field options like [deprecated = true]
+  SkipWhitespaces(Proto, iPos);
+  if (iPos <= Length(Proto)) and (Proto[iPos] = '[') then
+  begin
+    ReadAllTillChar(Proto, iPos, [']']);
+    SkipRequiredChar(Proto, iPos, ']');
+  end;
   SkipRequiredChar(Proto, iPos, ';');
   ReadCommentIfExists(FComments, False, Proto, iPos);
 end;
@@ -543,12 +654,12 @@ begin
         if SameText(sOptionPeek, 'option') then
         begin
           iPos:= lPos;
-          sOptionPeek:= ReadWordFromBuf(Proto, iPos, [';']);
+          sOptionPeek:= ReadWordFromBuf(Proto, iPos, [';', '=']);
           SkipRequiredChar(Proto, iPos, '=');
           sOptionValue:= ReadWordFromBuf(Proto, iPos, [';']);
           if SameText(sOptionPeek, 'allow_alias') then
-            FAllowAlias:= SameText(sOptionValue, 'true') else
-            raise EParserError.CreateFmt('Unknown option %s while parsing enum %s', [sOptionPeek, FName]);
+            FAllowAlias:= SameText(sOptionValue, 'true');
+          // Silently ignore other unknown enum options
           SkipRequiredChar(Proto, iPos, ';');
         end else
         begin
@@ -634,6 +745,17 @@ begin
         ReadCommentIfExists(TempComments, True, Proto, iPos);
         if Proto[iPos] = '}' then //after reading comments, the message might prematurly end
           Continue;
+        // Skip message-level option statements: option name = value;
+        if (PosEx('option', Proto, iPos) = iPos) and
+           ((iPos + Length('option') > Length(Proto)) or
+            Proto[iPos + Length('option')].IsWhiteSpace) then
+          begin
+            Inc(iPos, Length('option'));
+            ReadAllTillChar(Proto, iPos, [';']);
+            SkipRequiredChar(Proto, iPos, ';');
+            TempComments.Clear;
+            Continue;
+          end;
         if PosEx('enum', Proto, iPos) = iPos then
           begin
             Inc(iPos, Length('enum'));
@@ -832,6 +954,21 @@ begin
         if Buf = 'extend' then
         begin
           ParseMessage(Proto, iPos, TempComments, True);
+          TempComments.Clear;
+        end;
+        // Skip file-level option statements: option name = value;
+        if Buf = 'option' then
+        begin
+          ReadAllTillChar(Proto, iPos, [';']);
+          SkipRequiredChar(Proto, iPos, ';');
+          TempComments.Clear;
+        end;
+        // Skip service definitions: service Name { ... }
+        if Buf = 'service' then
+        begin
+          ReadWordFromBuf(Proto, iPos, ['{']); // skip service name
+          SkipRequiredChar(Proto, iPos, '{');  // skip opening brace
+          SkipBlockBody(Proto, iPos);          // skip until matching '}'
           TempComments.Clear;
         end;
       end;

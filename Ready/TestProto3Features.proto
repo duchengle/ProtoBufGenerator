@@ -1,0 +1,69 @@
+syntax = "proto3";
+
+/*
+ * TestProto3Features.proto
+ * Demonstrates proto3 features supported by the updated generator:
+ *   - Block comments (this block comment)
+ *   - File-level options
+ *   - Map fields
+ *   - oneof fields
+ *   - Service definitions (skipped by generator)
+ *   - Enum value options
+ */
+
+package TestProto3Features;
+
+// File-level options are now silently skipped
+option java_package = "com.example.proto3";
+option go_package = "example.com/proto3features";
+
+// Status enum with value options
+enum Status {
+    UNKNOWN = 0;
+    ACTIVE = 1 [deprecated = false];
+    INACTIVE = 2 [deprecated = true];
+    DELETED = 3;
+}
+
+// Simple address message
+message Address {
+    string street = 1;
+    string city = 2;
+    string country = 3;
+}
+
+// Message demonstrating map fields
+message UserProfile {
+    string name = 1;
+    int32 age = 2;
+    Status status = 3;
+
+    // Map of string key to string value (metadata tags)
+    map<string, string> tags = 4;
+
+    // Map of string key to int32 value (scores per category)
+    map<string, int32> scores = 5;
+
+    // oneof for contact method
+    oneof contact {
+        string email = 10;
+        string phone = 11;
+    }
+}
+
+// Message demonstrating map<string, Message> value type
+message Organization {
+    string name = 1;
+
+    // Map of department name to its address
+    map<string, Address> departments = 2;
+
+    // Repeated members
+    repeated UserProfile members = 3;
+}
+
+// Service definition - should be silently skipped by the generator
+service UserService {
+    rpc GetUser (UserProfile) returns (UserProfile);
+    rpc ListUsers (Organization) returns (Organization);
+}
