@@ -146,6 +146,25 @@ type
     procedure TestParseFromProto1;
     procedure TestNestedEnum;
     procedure TestParseSyntaxReservedWord;
+    procedure TestParseProto3Features;
+  end;
+
+  // Test methods for proto3 new features: map, block comments, options, service
+  TestTProto3Features = class(TTestCase)
+  strict private
+    FProtoFile: TProtoFile;
+  private
+    procedure CallParseFromProto(const AProto: string);
+  public
+    procedure SetUp; override;
+    procedure TearDown; override;
+  published
+    procedure TestMapField;
+    procedure TestBlockComment;
+    procedure TestFileLevelOption;
+    procedure TestServiceSkipped;
+    procedure TestEnumValueOptions;
+    procedure TestMessageLevelOption;
   end;
 
 implementation
@@ -458,7 +477,12 @@ begin
   CheckException(ParserErrorOptionEqualsMissing, Exception, 'missing equal sign for option must cause exception');
   CheckException(ParserErrorOptionValueMissing, Exception, 'missing option value must cause exception');
   CheckException(ParserErrorOptionTerminatorMissing, Exception, 'missing option terminator must cause exception');
-  CheckException(ParserErrorOptionUnknownOptionName, Exception, 'unsupported option name must cause exception');
+  // Note: unknown option names are now silently ignored for proto3 compatibility
+  // (no longer raises an exception, just skips the unknown option)
+  CallParseFromProto('Enum1{'#13#10'  option unknown = true;'#13#10' Val1 = 1;}');
+  CheckEquals('Enum1', FProtoBufEnum.Name);
+  CheckEquals(1, FProtoBufEnum.Count);
+  CheckEquals('Val1', FProtoBufEnum[0].Name);
 end;
 
 procedure TestTProtoBufEnum.TestParseFromProto;
@@ -755,6 +779,217 @@ begin
   CheckException(ParserErrorUnexpectedFieldNumber, Exception, 'ParserErrorUnexpectedFieldNumber did not raise Exception');
 end;
 
+procedure TestTProtoFile.TestParseProto3Features;
+var
+  Proto: string;
+  iPos: Integer;
+begin
+  // Test that the parser handles proto3 features without errors
+  Proto :=
+    'syntax = "proto3";'#13#10 +
+    'package proto3test;'#13#10 +
+    'option java_package = "com.example";'#13#10 +
+    'message SearchRequest {'#13#10 +
+    '  string query = 1;'#13#10 +
+    '  map<string, int32> scores = 2;'#13#10 +
+    '  option deprecated = false;'#13#10 +
+    '}'#13#10 +
+    'service SearchService {'#13#10 +
+    '  rpc Search (SearchRequest) returns (SearchRequest);'#13#10 +
+    '}';
+  iPos := 1;
+  FProtoFile.ParseFromProto(Proto, iPos);
+  CheckTrue(FProtoFile.ProtoSyntaxVersion = psv3);
+  CheckEquals('proto3test', FProtoFile.Name);
+  CheckEquals(1, FProtoFile.ProtoBufMessages.Count);
+  CheckEquals('SearchRequest', FProtoFile.ProtoBufMessages[0].Name);
+  // query(1) + scores(1 map field) = 2 fields
+  CheckEquals(2, FProtoFile.ProtoBufMessages[0].Count);
+  CheckEquals(ptMap, FProtoFile.ProtoBufMessages[0][1].PropKind);
+  CheckEquals('scores', FProtoFile.ProtoBufMessages[0][1].Name);
+  CheckEquals('string', FProtoFile.ProtoBufMessages[0][1].MapKeyType);
+  CheckEquals('int32', FProtoFile.ProtoBufMessages[0][1].PropType);
+  CheckEquals(2, FProtoFile.ProtoBufMessages[0][1].PropFieldNum);
+end;
+
+{ TestTProto3Features }
+
+procedure TestTProto3Features.CallParseFromProto(const AProto: string);
+var
+  iPos: Integer;
+begin
+  iPos := 1;
+  FProtoFile.ParseFromProto(AProto, iPos);
+end;
+
+procedure TestTProto3Features.SetUp;
+begin
+  FProtoFile := TProtoFile.Create(nil);
+end;
+
+procedure TestTProto3Features.TearDown;
+begin
+  FProtoFile.Free;
+  FProtoFile := nil;
+end;
+
+procedure TestTProto3Features.TestMapField;
+var
+  Proto: string;
+  iPos: Integer;
+  Prop: TProtoBufProperty;
+begin
+  Proto :=
+    'package maptest;'#13#10 +
+    'message MapMsg {'#13#10 +
+    '  map<string, int32> weights = 1;'#13#10 +
+    '  map<int32, string> labels = 2;'#13#10 +
+    '  map<string, bool> flags = 3;'#13#10 +
+    '}';
+  iPos := 1;
+  FProtoFile.ParseFromProto(Proto, iPos);
+  CheckEquals(1, FProtoFile.ProtoBufMessages.Count);
+  CheckEquals('MapMsg', FProtoFile.ProtoBufMessages[0].Name);
+  CheckEquals(3, FProtoFile.ProtoBufMessages[0].Count);
+
+  Prop := FProtoFile.ProtoBufMessages[0][0];
+  CheckEquals(ptMap, Prop.PropKind);
+  CheckEquals('weights', Prop.Name);
+  CheckEquals('string', Prop.MapKeyType);
+  CheckEquals('int32', Prop.PropType);
+  CheckEquals(1, Prop.PropFieldNum);
+
+  Prop := FProtoFile.ProtoBufMessages[0][1];
+  CheckEquals(ptMap, Prop.PropKind);
+  CheckEquals('labels', Prop.Name);
+  CheckEquals('int32', Prop.MapKeyType);
+  CheckEquals('string', Prop.PropType);
+  CheckEquals(2, Prop.PropFieldNum);
+
+  Prop := FProtoFile.ProtoBufMessages[0][2];
+  CheckEquals(ptMap, Prop.PropKind);
+  CheckEquals('flags', Prop.Name);
+  CheckEquals('string', Prop.MapKeyType);
+  CheckEquals('bool', Prop.PropType);
+  CheckEquals(3, Prop.PropFieldNum);
+end;
+
+procedure TestTProto3Features.TestBlockComment;
+var
+  Proto: string;
+  iPos: Integer;
+begin
+  Proto :=
+    '/* Block comment at start */'#13#10 +
+    'package blocktest;'#13#10 +
+    '/* Multi-line'#13#10 +
+    '   block comment */'#13#10 +
+    'message Msg1 {'#13#10 +
+    '  /* field comment */ string name = 1;'#13#10 +
+    '}';
+  iPos := 1;
+  FProtoFile.ParseFromProto(Proto, iPos);
+  CheckEquals('blocktest', FProtoFile.Name);
+  CheckEquals(1, FProtoFile.ProtoBufMessages.Count);
+  CheckEquals('Msg1', FProtoFile.ProtoBufMessages[0].Name);
+  CheckEquals(1, FProtoFile.ProtoBufMessages[0].Count);
+  CheckEquals('name', FProtoFile.ProtoBufMessages[0][0].Name);
+end;
+
+procedure TestTProto3Features.TestFileLevelOption;
+var
+  Proto: string;
+  iPos: Integer;
+begin
+  Proto :=
+    'syntax = "proto3";'#13#10 +
+    'package opttest;'#13#10 +
+    'option java_package = "com.example";'#13#10 +
+    'option go_package = "example.com/test";'#13#10 +
+    'enum Status {'#13#10 +
+    '  UNKNOWN = 0;'#13#10 +
+    '  ACTIVE = 1;'#13#10 +
+    '}';
+  iPos := 1;
+  FProtoFile.ParseFromProto(Proto, iPos);
+  CheckEquals('opttest', FProtoFile.Name);
+  CheckEquals(1, FProtoFile.ProtoBufEnums.Count);
+  CheckEquals('Status', FProtoFile.ProtoBufEnums[0].Name);
+  CheckEquals(2, FProtoFile.ProtoBufEnums[0].Count);
+end;
+
+procedure TestTProto3Features.TestServiceSkipped;
+var
+  Proto: string;
+  iPos: Integer;
+begin
+  Proto :=
+    'package svctest;'#13#10 +
+    'message Request { int32 id = 1; }'#13#10 +
+    'message Response { string result = 1; }'#13#10 +
+    'service MyService {'#13#10 +
+    '  rpc DoSomething (Request) returns (Response);'#13#10 +
+    '  rpc Stream (Request) returns (stream Response);'#13#10 +
+    '}'#13#10 +
+    'message ExtraMsg { bool flag = 1; }';
+  iPos := 1;
+  FProtoFile.ParseFromProto(Proto, iPos);
+  CheckEquals('svctest', FProtoFile.Name);
+  // Service must be skipped; messages should still be parsed
+  CheckEquals(3, FProtoFile.ProtoBufMessages.Count);
+  CheckEquals('Request', FProtoFile.ProtoBufMessages[0].Name);
+  CheckEquals('Response', FProtoFile.ProtoBufMessages[1].Name);
+  CheckEquals('ExtraMsg', FProtoFile.ProtoBufMessages[2].Name);
+end;
+
+procedure TestTProto3Features.TestEnumValueOptions;
+var
+  Proto: string;
+  iPos: Integer;
+begin
+  Proto :=
+    'package enumopttest;'#13#10 +
+    'enum Priority {'#13#10 +
+    '  UNSET = 0 [deprecated = false];'#13#10 +
+    '  LOW = 1 [deprecated = false];'#13#10 +
+    '  HIGH = 2 [deprecated = true];'#13#10 +
+    '}';
+  iPos := 1;
+  FProtoFile.ParseFromProto(Proto, iPos);
+  CheckEquals('enumopttest', FProtoFile.Name);
+  CheckEquals(1, FProtoFile.ProtoBufEnums.Count);
+  CheckEquals('Priority', FProtoFile.ProtoBufEnums[0].Name);
+  CheckEquals(3, FProtoFile.ProtoBufEnums[0].Count);
+  CheckEquals('UNSET', FProtoFile.ProtoBufEnums[0][0].Name);
+  CheckEquals(0, FProtoFile.ProtoBufEnums[0][0].Value);
+  CheckEquals('LOW', FProtoFile.ProtoBufEnums[0][1].Name);
+  CheckEquals(1, FProtoFile.ProtoBufEnums[0][1].Value);
+  CheckEquals('HIGH', FProtoFile.ProtoBufEnums[0][2].Name);
+  CheckEquals(2, FProtoFile.ProtoBufEnums[0][2].Value);
+end;
+
+procedure TestTProto3Features.TestMessageLevelOption;
+var
+  Proto: string;
+  iPos: Integer;
+begin
+  Proto :=
+    'package msgopttest;'#13#10 +
+    'message MyMsg {'#13#10 +
+    '  option deprecated = true;'#13#10 +
+    '  string name = 1;'#13#10 +
+    '  int32 age = 2;'#13#10 +
+    '}';
+  iPos := 1;
+  FProtoFile.ParseFromProto(Proto, iPos);
+  CheckEquals(1, FProtoFile.ProtoBufMessages.Count);
+  CheckEquals('MyMsg', FProtoFile.ProtoBufMessages[0].Name);
+  // option is skipped, only name and age fields should be present
+  CheckEquals(2, FProtoFile.ProtoBufMessages[0].Count);
+  CheckEquals('name', FProtoFile.ProtoBufMessages[0][0].Name);
+  CheckEquals('age', FProtoFile.ProtoBufMessages[0][1].Name);
+end;
+
 initialization
   RegisterTest('Parser', TestTProtoBufPropOption.Suite);
   RegisterTest('Parser', TestTProtoBufPropOptions.Suite);
@@ -764,4 +999,5 @@ initialization
   RegisterTest('Parser', TestTProtoBufEnum.Suite);
   RegisterTest('Parser', TestTProtoBufMessage.Suite);
   RegisterTest('Parser', TestTProtoFile.Suite);
+  RegisterTest('Parser', TestTProto3Features.Suite);
 end.
